@@ -89,6 +89,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	{
 		protected.GET("/clients", h.AdminListClients)
 		protected.POST("/clients", h.AdminCreateClient)
+		protected.POST("/appointments", h.AdminCreateAppointment)
 		protected.DELETE("/clients/:id", h.AdminDeleteClient)
 
 		protected.GET("/appointments", h.AdminListAppointments)
@@ -688,4 +689,62 @@ func (h *Handler) AdminDeleteBlock(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+
+func (h *Handler) AdminCreateAppointment(c *gin.Context) {
+	var req struct {
+		Client struct {
+			FirstName string `json:"first_name" binding:"required"`
+			LastName  string `json:"last_name"  binding:"required"`
+			Patronym  string `json:"patronym"`
+			Phone     string `json:"phone"      binding:"required"`
+			Email     string `json:"email"      binding:"required,email"`
+		} `json:"client" binding:"required"`
+		ServiceID     string `json:"service_id"     binding:"required"`
+		Format        string `json:"format"         binding:"required,oneof=online offline"`
+		StartsAt      string `json:"starts_at"      binding:"required"`
+		PaymentStatus string `json:"payment_status" binding:"omitempty,oneof=paid pending"`
+		Notes         string `json:"notes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+ 
+	serviceID, err := uuid.Parse(req.ServiceID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid service_id"})
+		return
+	}
+	startsAt, err := time.Parse(time.RFC3339, req.StartsAt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid starts_at, use RFC3339"})
+		return
+	}
+ 
+	appt, err := h.apptSvc.BookManual(c.Request.Context(), service.ManualBookRequest{
+		Client: service.ClientInfo{
+			FirstName: req.Client.FirstName,
+			LastName:  req.Client.LastName,
+			Patronym:  req.Client.Patronym,
+			Phone:     req.Client.Phone,
+			Email:     req.Client.Email,
+		},
+		ServiceID:     serviceID,
+		Format:        models.AppointmentFormat(req.Format),
+		StartsAt:      startsAt,
+		PaymentStatus: req.PaymentStatus,
+		Notes:         req.Notes,
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrPhoneTakenByAnotherEmail) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+ 
+	c.JSON(http.StatusCreated, appt)
 }

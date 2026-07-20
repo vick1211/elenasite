@@ -166,3 +166,81 @@ async function rescheduleBooking(id) {
         alert('Не удалось перенести запись: ' + err.message);
     }
 }
+
+
+// ===== Ручное создание записи (клиент договорился по телефону и т.п.) =====
+let servicesForSelect = [];
+
+async function ensureServiceOptionsLoaded() {
+    if (servicesForSelect.length > 0) return;
+    try {
+        const response = await fetch('/api/v1/services');
+        servicesForSelect = await response.json() || [];
+        const select = document.getElementById('manualServiceSelect');
+        select.innerHTML = servicesForSelect
+            .map(s => `<option value="${s.id}">${escapeHtml(s.title)} — ${(s.price_kopeks / 100).toLocaleString('ru-RU')} ₽</option>`)
+            .join('');
+    } catch (err) {
+        console.error('Не удалось загрузить список услуг:', err);
+    }
+}
+
+async function toggleManualBookingForm() {
+    const form = document.getElementById('manualBookingForm');
+    const isHidden = form.style.display === 'none' || !form.style.display;
+    form.style.display = isHidden ? 'block' : 'none';
+    if (isHidden) {
+        await ensureServiceOptionsLoaded();
+        document.getElementById('manualFirstName').focus();
+    } else {
+        clearManualBookingForm();
+    }
+}
+
+function clearManualBookingForm() {
+    ['manualFirstName', 'manualLastName', 'manualPatronym', 'manualPhone', 'manualEmail', 'manualDate', 'manualTime', 'manualNotes']
+        .forEach(id => { document.getElementById(id).value = ''; });
+}
+
+async function saveManualBooking() {
+    const firstName = document.getElementById('manualFirstName').value.trim();
+    const lastName = document.getElementById('manualLastName').value.trim();
+    const patronym = document.getElementById('manualPatronym').value.trim();
+    const phone = document.getElementById('manualPhone').value.trim();
+    const email = document.getElementById('manualEmail').value.trim();
+    const serviceId = document.getElementById('manualServiceSelect').value;
+    const dateStr = document.getElementById('manualDate').value;
+    const timeStr = document.getElementById('manualTime').value;
+    const format = document.getElementById('manualFormat').value;
+    const paymentStatus = document.getElementById('manualPaymentStatus').value;
+    const notes = document.getElementById('manualNotes').value.trim();
+
+    if (!firstName || !lastName || !phone || !email || !serviceId || !dateStr || !timeStr) {
+        alert('Заполните обязательные поля: имя, фамилия, телефон, email, услуга, дата и время');
+        return;
+    }
+
+    const [y, mo, d] = dateStr.split('-').map(Number);
+    const [hh, mi] = timeStr.split(':').map(Number);
+    const startsAt = new Date(y, mo - 1, d, hh, mi, 0).toISOString();
+
+    try {
+        await apiFetch('/admin/appointments', {
+            method: 'POST',
+            body: JSON.stringify({
+                client: { first_name: firstName, last_name: lastName, patronym, phone, email },
+                service_id: serviceId,
+                format,
+                starts_at: startsAt,
+                payment_status: paymentStatus,
+                notes,
+            }),
+        });
+        clearManualBookingForm();
+        toggleManualBookingForm();
+        alert('Запись создана, клиенту отправлено письмо с подтверждением');
+        loadBookings();
+    } catch (err) {
+        alert('Не удалось создать запись: ' + err.message);
+    }
+}

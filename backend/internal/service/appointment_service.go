@@ -332,6 +332,69 @@ func (s *AppointmentService) issueTokenAndNotify(ctx context.Context, appt *mode
 	})
 }
 
+type ManualBookRequest struct {
+	Client        ClientInfo
+	ServiceID     uuid.UUID
+	Format        models.AppointmentFormat
+	StartsAt      time.Time
+	PaymentStatus string
+	Notes         string
+}
+ 
+func (s *AppointmentService) BookManual(ctx context.Context, req ManualBookRequest) (*models.Appointment, error) {
+	client, err := s.clientRepo.FindOrCreate(ctx, &models.Client{
+		FirstName: req.Client.FirstName,
+		LastName:  req.Client.LastName,
+		Patronym:  req.Client.Patronym,
+		Phone:     req.Client.Phone,
+		Email:     req.Client.Email,
+	})
+	if err != nil {
+		return nil, err
+	}
+ 
+	svc, err := s.serviceRepo.GetByID(ctx, req.ServiceID)
+	if err != nil {
+		return nil, fmt.Errorf("service: %w", err)
+	}
+ 
+	duration := time.Duration(svc.DurationMin) * time.Minute
+	if duration == 0 {
+		duration = 60 * time.Minute
+	}
+ 
+	paymentStatus := req.PaymentStatus
+	if paymentStatus == "" {
+		paymentStatus = models.PaymentStatusPaid
+	}
+ 
+	appt := &models.Appointment{
+		ClientID:      client.ID,
+		ServiceID:     req.ServiceID,
+		Format:        req.Format,
+		StartsAt:      req.StartsAt,
+		EndsAt:        req.StartsAt.Add(duration),
+		Status:        models.StatusConfirmed,
+		PaymentMode:   models.PaymentModeFull,
+		PaymentStatus: paymentStatus,
+		AmountKopeks:  svc.PriceKopeks,
+		Notes:         req.Notes,
+	}
+ 
+	if err := s.apptRepo.Create(ctx, appt); err != nil {
+		return nil, fmt.Errorf("время уже занято или произошла ошибка: %w", err)
+	}
+ 
+	appt.Client = client
+	appt.Service = svc
+ 
+	if err := s.issueTokenAndNotify(ctx, appt, client); err != nil {
+		fmt.Printf("warn: notify manual booking: %v\n", err)
+	}
+ 
+	return appt, nil
+}
+
 func randomURLSafeToken(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
