@@ -276,6 +276,24 @@
             <div class="section-header">
                 <h1 class="section-title">Управление записями клиентов</h1>
                 <p class="section-subtitle">Просматривайте и управляйте всеми заявками на консультацию</p>
+                            <div class="table-responsive">
+                <table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>Клиент</th>
+                            <th>Услуга</th>
+                            <th>Дата и время</th>
+                            <th>Статус</th>
+                            <th>Оплата</th>
+                            <th>Создано</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bookingsTableBody">
+                        <!-- JS отрисует записи здесь -->
+                    </tbody>
+                </table>
+            </div>
             </div>
             <button class="btn" style="margin-bottom: 20px;" onclick="toggleManualBookingForm()">+ Добавить запись вручную</button>
 
