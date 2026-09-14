@@ -21,6 +21,7 @@ type Config struct {
 	YooKassa                  YooKassaConfig
 
 	StalePendingMinutes int
+	CORSOrigins         []string
 }
 
 type DBConfig struct {
@@ -56,7 +57,7 @@ type YooKassaConfig struct {
 
 func Load() (*Config, error) {
 	if err := godotenv.Load(); err != nil {
-    	log.Printf("warning: .env not loaded: %v", err)
+		log.Printf("warning: .env not loaded: %v", err)
 	}
 
 	cfg := &Config{
@@ -82,7 +83,6 @@ func Load() (*Config, error) {
 			From:     getEnv("SMTP_FROM", ""),
 		},
 
-		// По умолчанию 12 — так на сайте написано в условиях отмены/переноса.
 		CancellationDeadlineHours: getEnvInt("CANCELLATION_DEADLINE_HOURS", 12),
 
 		YooKassa: YooKassaConfig{
@@ -94,6 +94,7 @@ func Load() (*Config, error) {
 		},
 
 		StalePendingMinutes: getEnvInt("STALE_PENDING_MINUTES", 30),
+		CORSOrigins:         getEnvList("CORS_ORIGINS", ""),
 	}
 
 	return cfg, nil
