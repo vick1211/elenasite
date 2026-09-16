@@ -17,8 +17,6 @@ func New(cfg config.SMTPConfig) *Mailer {
 	return &Mailer{cfg: cfg}
 }
 
-// ---- Стилевые константы (в стиле сайта ekosta.ru) ----
-
 const fontBody = `'Jost', Arial, Helvetica, sans-serif`
 const fontHeading = `'Playfair Display', Georgia, 'Times New Roman', serif`
 const colorPrimary = "#385C8E"
@@ -26,7 +24,6 @@ const colorBg = "#FAF8F4"
 const colorText = "#2B2B2B"
 const colorTextMuted = "#6A6A6A"
 
-// emailShell — общая "рамка" письма: шапка с именем, белая карточка с контентом, подвал.
 func emailShell(preheader, bodyHTML string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="ru">
@@ -77,7 +74,6 @@ func emailShell(preheader, bodyHTML string) string {
 	)
 }
 
-// emailButton — квадратная кнопка-ссылка в стиле сайта (без border-radius).
 func emailButton(href, label string) string {
 	return fmt.Sprintf(`<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 4px;">
   <tr>
@@ -88,7 +84,6 @@ func emailButton(href, label string) string {
 </table>`, colorPrimary, html.EscapeString(href), fontBody, html.EscapeString(label))
 }
 
-// infoBox — плашка с ключевой информацией (дата приёма, детали и т.п.)
 func infoBox(innerHTML string) string {
 	return fmt.Sprintf(`<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%%; margin:20px 0; background-color:%s; border-left:3px solid %s;">
   <tr>
@@ -96,8 +91,6 @@ func infoBox(innerHTML string) string {
   </tr>
 </table>`, colorBg, colorPrimary, fontBody, colorText, innerHTML)
 }
-
-// ---- Подтверждение записи ----
 
 type BookingData struct {
 	FirstName       string
@@ -140,7 +133,48 @@ func (m *Mailer) SendBookingConfirmation(to string, d BookingData) error {
 	return m.send(to, subject, plainText, htmlBody)
 }
 
-// ---- Отмена записи ----
+type RescheduleData struct {
+	FirstName string
+	OldDate   time.Time
+	NewDate   time.Time
+	CancelURL string
+}
+
+func (m *Mailer) SendRescheduleNotice(to string, d RescheduleData) error {
+	oldDate := d.OldDate.Format("02.01.2006 в 15:04")
+	newDate := d.NewDate.Format("02.01.2006 в 15:04")
+
+	subject := fmt.Sprintf("%s, ваша запись перенесена на %s", d.FirstName, newDate)
+
+	plainText := fmt.Sprintf(
+		"%s, ваша запись к Елене перенесена с %s на %s.\n\n"+
+			"Вы можете отменить запись по ссылке:\n%s",
+		d.FirstName, oldDate, newDate, d.CancelURL,
+	)
+
+	body := fmt.Sprintf(`
+		<div style="font-family:%s; font-size:20px; font-weight:600; color:%s; margin-bottom:16px;">Запись перенесена</div>
+		<div style="font-family:%s; font-size:15px; color:%s; line-height:1.7;">
+			%s, здравствуйте!<br><br>
+			Ваша запись к Елене Костаревой перенесена с <strong>%s</strong> на новое время.
+		</div>
+		%s
+		<div style="font-family:%s; font-size:14px; color:%s; line-height:1.7;">
+			Если новое время вам не подходит, вы можете отменить запись по кнопке ниже.
+		</div>
+		%s
+	`,
+		fontHeading, colorText,
+		fontBody, colorTextMuted, html.EscapeString(d.FirstName), html.EscapeString(oldDate),
+		infoBox(fmt.Sprintf("<strong>Новая дата и время:</strong> %s", html.EscapeString(newDate))),
+		fontBody, colorTextMuted,
+		emailButton(d.CancelURL, "Отменить запись"),
+	)
+
+	htmlBody := emailShell(fmt.Sprintf("Ваша запись перенесена на %s", newDate), body)
+
+	return m.send(to, subject, plainText, htmlBody)
+}
 
 type CancellationData struct {
 	FirstName       string
@@ -193,8 +227,6 @@ func (m *Mailer) SendCancellationConfirmation(to string, d CancellationData) err
 	return m.send(to, subject, plainText, htmlBody)
 }
 
-// ---- Неудачная оплата ----
-
 func (m *Mailer) SendPaymentFailedNotice(to, firstName string) error {
 	subject := "Не удалось провести оплату"
 
@@ -222,8 +254,6 @@ func (m *Mailer) SendPaymentFailedNotice(to, firstName string) error {
 	return m.send(to, subject, plainText, htmlBody)
 }
 
-// ---- Отправка (текст + HTML альтернатива) ----
-
 func (m *Mailer) send(to, subject, plainText, htmlBody string) error {
 	msg := gomail.NewMessage()
 	msg.SetHeader("From", m.cfg.From)
@@ -241,13 +271,17 @@ func (m *Mailer) send(to, subject, plainText, htmlBody string) error {
 	return nil
 }
 
-// ---- Заглушка (когда SMTP не настроен) ----
-
 type StubMailer struct{}
 
 func (s *StubMailer) SendBookingConfirmation(_ string, d BookingData) error {
 	fmt.Printf("[STUB MAIL] booking: to=%s date=%s cancel=%s\n",
 		"<email>", d.AppointmentDate.Format(time.RFC3339), d.CancelURL)
+	return nil
+}
+
+func (s *StubMailer) SendRescheduleNotice(_ string, d RescheduleData) error {
+	fmt.Printf("[STUB MAIL] reschedule: old=%s new=%s cancel=%s\n",
+		d.OldDate.Format(time.RFC3339), d.NewDate.Format(time.RFC3339), d.CancelURL)
 	return nil
 }
 
