@@ -14,7 +14,7 @@ type yookassaWebhookPayload struct {
 	Type   string `json:"type"`
 	Event  string `json:"event"`
 	Object struct {
-		ID string `json:"id"`
+		ID        string            `json:"id"`
 		PaymentID string            `json:"payment_id"`
 		Status    string            `json:"status"`
 		Metadata  map[string]string `json:"metadata"`
@@ -69,6 +69,14 @@ func (h *Handler) YooKassaWebhook(c *gin.Context) {
 		}
 
 	case "canceled":
+		appt, getErr := h.apptRepo.GetByID(c.Request.Context(), apptID)
+		if getErr != nil {
+			log.Printf("yookassa webhook: load appointment: %v", getErr)
+			break
+		}
+		if appt.Status != models.StatusPending {
+			break
+		}
 		if err := h.apptRepo.UpdatePaymentStatus(c.Request.Context(), apptID, models.PaymentStatusFailed); err != nil {
 			log.Printf("yookassa webhook: update status failed: %v", err)
 		}
@@ -86,6 +94,16 @@ func (h *Handler) YooKassaWebhook(c *gin.Context) {
 	}
 
 	if strings.HasPrefix(payload.Event, "refund.") && payload.Event == "refund.succeeded" {
+		appt, getErr := h.apptRepo.GetByID(c.Request.Context(), apptID)
+		if getErr != nil {
+			log.Printf("yookassa webhook: load appointment for refund: %v", getErr)
+			c.Status(http.StatusOK)
+			return
+		}
+		if appt.PaymentStatus == models.PaymentStatusRefunded {
+			c.Status(http.StatusOK)
+			return
+		}
 		if err := h.apptRepo.UpdatePaymentStatus(c.Request.Context(), apptID, models.PaymentStatusRefunded); err != nil {
 			log.Printf("yookassa webhook: update status refunded: %v", err)
 		}
