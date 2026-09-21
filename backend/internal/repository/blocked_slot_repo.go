@@ -52,6 +52,37 @@ func (r *BlockedSlotRepo) ListRange(ctx context.Context, from, to time.Time) ([]
 	return list, nil
 }
 
+func (r *BlockedSlotRepo) IsBlocked(ctx context.Context, startsAt, endsAt time.Time, loc *time.Location) (bool, error) {
+	startLocal := startsAt.In(loc)
+	endLocal := endsAt.In(loc)
+	var rows []struct {
+		BlockedDate time.Time `db:"blocked_date"`
+		SlotTime    *string   `db:"slot_time"`
+	}
+	if err := r.db.SelectContext(ctx, &rows, `
+		select blocked_date, slot_time
+		from blocked_slots
+		where blocked_date between $1::date and $2::date
+	`, startLocal, endLocal); err != nil {
+		return false, fmt.Errorf("check blocked slot: %w", err)
+	}
+	for _, row := range rows {
+		date := row.BlockedDate.In(loc)
+		if row.SlotTime == nil {
+			return true, nil
+		}
+		slot, err := time.ParseInLocation("15:04", *row.SlotTime, loc)
+		if err != nil {
+			return false, fmt.Errorf("invalid stored blocked slot time: %w", err)
+		}
+		blockedAt := time.Date(date.Year(), date.Month(), date.Day(), slot.Hour(), slot.Minute(), 0, 0, loc)
+		if !blockedAt.Before(startLocal) && blockedAt.Before(endLocal) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *BlockedSlotRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.ExecContext(ctx, `delete from blocked_slots where id = $1`, id)
 	return err
