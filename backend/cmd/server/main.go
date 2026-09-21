@@ -10,6 +10,10 @@ import (
 	"elena-backend/internal/service"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -57,6 +61,7 @@ func main() {
 		tokenRepo,
 		clientRepo,
 		serviceRepo,
+		blockedSlotRepo,
 		mailSender,
 		paymentProvider,
 		cfg.BaseURL,
@@ -72,8 +77,18 @@ func main() {
 		log.Fatalf("set trusted proxies: %v", err)
 	}
 
+	allowedOrigins := make(map[string]struct{}, len(cfg.CORSOrigins))
+	for _, origin := range cfg.CORSOrigins {
+		allowedOrigins[origin] = struct{}{}
+	}
 	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		if origin != "" {
+			if _, ok := allowedOrigins[origin]; ok {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+			}
+		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == "OPTIONS" {
@@ -100,9 +115,22 @@ func main() {
 	h.RegisterRoutes(r)
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
-	log.Printf("Server listening on %s", addr)
-	if err := r.Run(addr); err != nil {
-		log.Fatalf("server: %v", err)
+	server := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+
+	go func() {
+		log.Printf("Server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server: %v", err)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown: %v", err)
 	}
 }
 
