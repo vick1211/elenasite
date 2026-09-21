@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"elena-backend/internal/models"
 	"fmt"
 )
 
@@ -12,17 +13,19 @@ type PaymentProvider interface {
 }
 
 type CreatePaymentReq struct {
-	AmountKopeks int64
-	Description  string
-	ReturnURL    string 
-	Metadata map[string]string
-	ClientEmail string
+	AmountKopeks   int64
+	Description    string
+	ReturnURL      string
+	Metadata       map[string]string
+	ClientEmail    string
+	PaymentMode    models.PaymentMode
+	IdempotencyKey string
 }
 
 type CreatePaymentResp struct {
 	PaymentID       string
-	ConfirmationURL string 
-	Status          string 
+	ConfirmationURL string
+	Status          string
 }
 
 type PaymentInfo struct {
@@ -35,7 +38,7 @@ type PaymentInfo struct {
 
 type RefundInfo struct {
 	RefundID string
-	Status   string 
+	Status   string
 }
 
 type StubPaymentProvider struct{}
