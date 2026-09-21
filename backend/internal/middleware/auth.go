@@ -18,11 +18,14 @@ type Claims struct {
 }
 
 func GenerateToken(adminID, secret string, ttl time.Duration) (string, error) {
+	now := time.Now()
 	claims := Claims{
 		AdminID: adminID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "elena-backend",
+			Audience:  []string{"admin"},
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(now),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -49,9 +52,13 @@ func RequireAdmin(jwtSecret string) gin.HandlerFunc {
 				return nil, errors.New("unexpected signing method")
 			}
 			return []byte(jwtSecret), nil
-		})
+		},
+			jwt.WithIssuer("elena-backend"),
+			jwt.WithAudience("admin"),
+			jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		)
 
-		if err != nil || !token.Valid {
+		if err != nil || !token.Valid || claims.AdminID == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			return
 		}
