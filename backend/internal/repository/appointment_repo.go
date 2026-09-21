@@ -54,7 +54,7 @@ func (r *AppointmentRepo) GetByIDWithRelations(ctx context.Context, id uuid.UUID
 		CPatronym  string `db:"c_patronym"`
 		CEmail     string `db:"c_email"`
 		CPhone     string `db:"c_phone"`
-		STitle string `db:"s_title"`
+		STitle     string `db:"s_title"`
 	}
 
 	var r2 row
@@ -182,6 +182,21 @@ type ListAppointmentsOpts struct {
 	Offset   int
 }
 
+func (r *AppointmentRepo) ConfirmPendingPayment(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		update appointments
+		set payment_status = 'paid', status = 'confirmed', updated_at = now()
+		where id = $1
+		  and status = 'pending'
+		  and payment_status = 'pending'
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 func (r *AppointmentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status models.AppointmentStatus) error {
 	_, err := r.db.ExecContext(ctx,
 		`update appointments set status = $1, updated_at = now() where id = $2`, status, id)
@@ -217,20 +232,32 @@ func (r *AppointmentRepo) UpdatePaymentStatus(ctx context.Context, id uuid.UUID,
 	return err
 }
 
-func (r *AppointmentRepo) CancelStalePending(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error) {
+func (r *AppointmentRepo) ListStalePending(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error) {
 	var ids []uuid.UUID
 	err := r.db.SelectContext(ctx, &ids, `
-		update appointments
-		set status = 'cancelled', payment_status = 'failed', updated_at = now()
+		select id from appointments
 		where status = 'pending'
 		  and payment_status = 'pending'
 		  and created_at < now() - $1::interval
-		returning id
+		order by created_at
 	`, fmt.Sprintf("%d minutes", int(olderThan.Minutes())))
 	if err != nil {
-		return nil, fmt.Errorf("cancel stale pending: %w", err)
+		return nil, fmt.Errorf("list stale pending: %w", err)
 	}
 	return ids, nil
+}
+
+func (r *AppointmentRepo) CancelPending(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		update appointments
+		set status = 'cancelled', payment_status = 'failed', updated_at = now()
+		where id = $1 and status = 'pending' and payment_status = 'pending'
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (r *AppointmentRepo) GetByPaymentID(ctx context.Context, paymentID string) (*models.Appointment, error) {
@@ -242,17 +269,22 @@ func (r *AppointmentRepo) GetByPaymentID(ctx context.Context, paymentID string) 
 	return &a, nil
 }
 
-func (r *AppointmentRepo) ListBusyTimes(ctx context.Context, from, to time.Time) ([]time.Time, error) {
-	var times []time.Time
-	err := r.db.SelectContext(ctx, &times, `
-		select starts_at from appointments
-		where starts_at >= $1 and starts_at < $2
+type BusyInterval struct {
+	StartsAt time.Time `db:"starts_at"`
+	EndsAt   time.Time `db:"ends_at"`
+}
+
+func (r *AppointmentRepo) ListBusyTimes(ctx context.Context, from, to time.Time) ([]BusyInterval, error) {
+	var intervals []BusyInterval
+	err := r.db.SelectContext(ctx, &intervals, `
+		select starts_at, ends_at from appointments
+		where starts_at < $2 and ends_at > $1
 		and status != 'cancelled'
 	`, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("list busy times: %w", err)
 	}
-	return times, nil
+	return intervals, nil
 }
 
 type CancellationTokenRepo struct {
@@ -286,9 +318,28 @@ func (r *CancellationTokenRepo) GetByToken(ctx context.Context, token string) (*
 	return &t, nil
 }
 
-func (r *CancellationTokenRepo) MarkUsed(ctx context.Context, id uuid.UUID) error {
-	now := time.Now()
-	_, err := r.db.ExecContext(ctx,
-		`update cancellation_tokens set used_at = $1 where id = $2`, now, id)
+func (r *CancellationTokenRepo) MarkUsed(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		update cancellation_tokens
+		set used_at = now()
+		where id = $1
+		  and used_at is null
+		  and expires_at > now()
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func (r *CancellationTokenRepo) InvalidateActiveForAppointment(ctx context.Context, appointmentID uuid.UUID) error {
+	_, err := r.db.ExecContext(ctx, `
+		update cancellation_tokens
+		set used_at = now()
+		where appointment_id = $1
+		  and used_at is null
+		  and expires_at > now()
+	`, appointmentID)
 	return err
 }
