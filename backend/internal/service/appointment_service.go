@@ -87,11 +87,26 @@ const (
 	calendarLocation  = "Asia/Yekaterinburg"
 )
 
-func validateAppointmentWindow(startsAt time.Time, duration time.Duration) error {
+func calendarLoc() *time.Location {
 	loc, err := time.LoadLocation(calendarLocation)
 	if err != nil {
-		loc = time.FixedZone("YEKT", 5*3600)
+		return time.FixedZone("YEKT", 5*3600)
 	}
+	return loc
+}
+
+func normalizeCalendarTime(t time.Time) (time.Time, error) {
+	loc := calendarLoc()
+	_, offset := t.Zone()
+	_, expectedOffset := time.Date(2026, 1, 1, 0, 0, 0, 0, loc).Zone()
+	if offset != expectedOffset {
+		return time.Time{}, fmt.Errorf("время должно быть передано с часовым поясом %s", calendarLocation)
+	}
+	return t.In(loc), nil
+}
+
+func validateAppointmentWindow(startsAt time.Time, duration time.Duration) error {
+	loc := calendarLoc()
 	local := startsAt.In(loc)
 	now := time.Now().In(loc)
 	if !local.After(now) {
@@ -114,6 +129,9 @@ func validateServiceChoice(svc *models.Service, format models.AppointmentFormat)
 	if !svc.IsActive {
 		return errors.New("услуга недоступна для записи")
 	}
+	if svc.IsDemo {
+		return errors.New("демо-услуга недоступна для публичной записи")
+	}
 	switch svc.Format {
 	case models.FormatOnline:
 		if format != models.AppointmentOnline {
@@ -134,10 +152,7 @@ func (s *AppointmentService) validateBookable(ctx context.Context, startsAt, end
 	if err := validateAppointmentWindow(startsAt, endsAt.Sub(startsAt)); err != nil {
 		return err
 	}
-	loc, err := time.LoadLocation(calendarLocation)
-	if err != nil {
-		loc = time.FixedZone("YEKT", 5*3600)
-	}
+	loc := calendarLoc()
 	blocked, err := s.blockedRepo.IsBlocked(ctx, startsAt, endsAt, loc)
 	if err != nil {
 		return err
@@ -176,12 +191,16 @@ func (s *AppointmentService) Book(ctx context.Context, req BookRequest) (*BookRe
 	if err := validateServiceChoice(svc, req.Format); err != nil {
 		return nil, err
 	}
+	startsAt, err := normalizeCalendarTime(req.StartsAt)
+	if err != nil {
+		return nil, err
+	}
 	duration := time.Duration(svc.DurationMin) * time.Minute
 	if duration <= 0 {
 		duration = 60 * time.Minute
 	}
-	endsAt := req.StartsAt.Add(duration)
-	if err := s.validateBookable(ctx, req.StartsAt, endsAt); err != nil {
+	endsAt := startsAt.Add(duration)
+	if err := s.validateBookable(ctx, startsAt, endsAt); err != nil {
 		return nil, err
 	}
 
@@ -189,7 +208,7 @@ func (s *AppointmentService) Book(ctx context.Context, req BookRequest) (*BookRe
 		ClientID:      client.ID,
 		ServiceID:     req.ServiceID,
 		Format:        req.Format,
-		StartsAt:      req.StartsAt,
+		StartsAt:      startsAt,
 		EndsAt:        endsAt,
 		Status:        models.StatusPending,
 		PaymentMode:   req.PaymentMode,
@@ -212,7 +231,7 @@ func (s *AppointmentService) Book(ctx context.Context, req BookRequest) (*BookRe
 
 	payResp, err := s.payment.CreatePayment(ctx, CreatePaymentReq{
 		AmountKopeks:   amountKopeks,
-		Description:    fmt.Sprintf("%s — приём %s", svc.Title, req.StartsAt.Format("02.01.2006 15:04")),
+		Description:    fmt.Sprintf("%s — приём %s", svc.Title, startsAt.Format("02.01.2006 15:04")),
 		ReturnURL:      s.paymentReturnURL,
 		ClientEmail:    client.Email,
 		PaymentMode:    req.PaymentMode,
@@ -226,8 +245,21 @@ func (s *AppointmentService) Book(ctx context.Context, req BookRequest) (*BookRe
 		return nil, fmt.Errorf("не удалось создать платёж: %w", err)
 	}
 
-	if err := s.apptRepo.SetPayment(ctx, appt.ID, payResp.PaymentID, amountKopeks, req.PaymentMode); err != nil {
-		fmt.Printf("warn: save payment id: %v\n", err)
+	var setPaymentErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		setPaymentErr = s.apptRepo.SetPayment(ctx, appt.ID, payResp.PaymentID, amountKopeks, req.PaymentMode)
+		if setPaymentErr == nil {
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+		}
+	}
+	if setPaymentErr != nil {
+		// Do not delete the appointment here: the payment has already been
+		// created. The webhook/reconciliation path can recover the payment id
+		// from YooKassa metadata.
+		return nil, fmt.Errorf("платёж создан, но не удалось сохранить его в записи: %w", setPaymentErr)
 	}
 	appt.PaymentID = payResp.PaymentID
 
@@ -242,7 +274,41 @@ func (s *AppointmentService) ConfirmPayment(ctx context.Context, apptID uuid.UUI
 	if appt.PaymentStatus == models.PaymentStatusPaid && appt.Status == models.StatusConfirmed {
 		return nil
 	}
+	if appt.Status == models.StatusCancelled && appt.PaymentStatus == models.PaymentStatusRefunded {
+		return nil
+	}
+	if appt.PaymentID == "" {
+		return errors.New("у записи отсутствует идентификатор платежа")
+	}
+	info, err := s.payment.GetPayment(ctx, appt.PaymentID)
+	if err != nil {
+		return fmt.Errorf("проверка платежа: %w", err)
+	}
+	if !info.Paid || info.Status != "succeeded" {
+		return nil
+	}
+	if appt.AmountKopeks > 0 && info.AmountKopeks > 0 && info.AmountKopeks != appt.AmountKopeks {
+		return fmt.Errorf("сумма платежа не совпадает с суммой записи")
+	}
 	if appt.Status != models.StatusPending {
+		// A late payment for a cancelled appointment must not resurrect it.
+		if appt.Status == models.StatusCancelled {
+			if appt.PaymentStatus == models.PaymentStatusRefunded {
+				return nil
+			}
+			refundAmount := info.AmountKopeks
+			if refundAmount <= 0 {
+				refundAmount = appt.AmountKopeks
+			}
+			refund, refundErr := s.payment.Refund(ctx, appt.PaymentID, refundAmount)
+			if refundErr != nil {
+				return fmt.Errorf("платёж получен после отмены записи; возврат не выполнен: %w", refundErr)
+			}
+			if refund.Status == "succeeded" {
+				return s.apptRepo.UpdatePaymentStatus(ctx, apptID, models.PaymentStatusRefunded)
+			}
+			return nil
+		}
 		return nil
 	}
 	changed, err := s.apptRepo.ConfirmPendingPayment(ctx, apptID)
@@ -324,6 +390,22 @@ func (s *AppointmentService) ConfirmCancellation(ctx context.Context, token stri
 	}
 
 	refundable := s.isRefundable(appt.StartsAt)
+	needsRefund := refundable && appt.PaymentStatus == models.PaymentStatusPaid && appt.PaymentID != ""
+
+	// Never cancel a paid appointment before a required refund has been
+	// successfully initiated. Otherwise a transient YooKassa error leaves the
+	// database in the dangerous state cancelled+paid.
+	var refundStatus string
+	if needsRefund {
+		refund, err := s.payment.Refund(ctx, appt.PaymentID, appt.AmountKopeks)
+		if err != nil {
+			return fmt.Errorf("не удалось оформить возврат: %w", err)
+		}
+		refundStatus = refund.Status
+		if refundStatus != "succeeded" && refundStatus != "pending" {
+			return fmt.Errorf("возврат не принят: статус %s", refundStatus)
+		}
+	}
 
 	used, err := s.tokenRepo.MarkUsed(ctx, ct.ID)
 	if err != nil {
@@ -332,24 +414,22 @@ func (s *AppointmentService) ConfirmCancellation(ctx context.Context, token stri
 	if !used {
 		return errors.New("ссылка недействительна или уже использована")
 	}
+
 	if err := s.apptRepo.UpdateStatus(ctx, appt.ID, models.StatusCancelled); err != nil {
 		return err
 	}
-
-	if refundable && appt.PaymentStatus == models.PaymentStatusPaid && appt.PaymentID != "" {
-		if _, err := s.payment.Refund(ctx, appt.PaymentID, appt.AmountKopeks); err != nil {
-			fmt.Printf("warn: refund failed for appointment %s: %v\n", appt.ID, err)
-		} else {
-			_ = s.apptRepo.UpdatePaymentStatus(ctx, appt.ID, models.PaymentStatusRefunded)
-		}
+	if needsRefund && refundStatus == "succeeded" {
+		_ = s.apptRepo.UpdatePaymentStatus(ctx, appt.ID, models.PaymentStatusRefunded)
 	}
 
-	_ = s.mailer.SendCancellationConfirmation(appt.Client.Email, mailer.CancellationData{
+	if err := s.mailer.SendCancellationConfirmation(appt.Client.Email, mailer.CancellationData{
 		FirstName:       appt.Client.FirstName,
 		AppointmentDate: appt.StartsAt,
-		Refund:          refundable,
+		Refund:          needsRefund,
 		DeadlineHours:   s.cancellationDeadlineHours,
-	})
+	}); err != nil {
+		fmt.Printf("warn: cancellation email for %s: %v\n", appt.ID, err)
+	}
 
 	return nil
 }
@@ -402,6 +482,10 @@ func (s *AppointmentService) Reschedule(ctx context.Context, apptID uuid.UUID, n
 		return errors.New("эту запись нельзя перенести")
 	}
 	oldStart := appt.StartsAt
+	newStart, err = normalizeCalendarTime(newStart)
+	if err != nil {
+		return err
+	}
 	duration := appt.EndsAt.Sub(appt.StartsAt)
 	newEnd := newStart.Add(duration)
 	if err := s.validateBookable(ctx, newStart, newEnd); err != nil {
@@ -509,12 +593,16 @@ func (s *AppointmentService) BookManual(ctx context.Context, req ManualBookReque
 	if err := validateServiceChoice(svc, req.Format); err != nil {
 		return nil, err
 	}
+	startsAt, err := normalizeCalendarTime(req.StartsAt)
+	if err != nil {
+		return nil, err
+	}
 	duration := time.Duration(svc.DurationMin) * time.Minute
 	if duration <= 0 {
 		duration = 60 * time.Minute
 	}
-	endsAt := req.StartsAt.Add(duration)
-	if err := s.validateBookable(ctx, req.StartsAt, endsAt); err != nil {
+	endsAt := startsAt.Add(duration)
+	if err := s.validateBookable(ctx, startsAt, endsAt); err != nil {
 		return nil, err
 	}
 
@@ -527,7 +615,7 @@ func (s *AppointmentService) BookManual(ctx context.Context, req ManualBookReque
 		ClientID:      client.ID,
 		ServiceID:     req.ServiceID,
 		Format:        req.Format,
-		StartsAt:      req.StartsAt,
+		StartsAt:      startsAt,
 		EndsAt:        endsAt,
 		Status:        models.StatusConfirmed,
 		PaymentMode:   models.PaymentModeFull,
