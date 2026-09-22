@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -21,10 +22,32 @@ type RateLimiter struct {
 }
 
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
-	return &RateLimiter{
+	r := &RateLimiter{
 		visitors: make(map[string]visitor),
 		limit:    limit,
 		window:   window,
+	}
+	go r.cleanupLoop()
+	return r
+}
+
+func (r *RateLimiter) cleanupLoop() {
+	interval := r.window
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		r.mu.Lock()
+		for key, v := range r.visitors {
+			if now.After(v.reset) {
+				delete(r.visitors, key)
+			}
+		}
+		r.mu.Unlock()
 	}
 }
 
@@ -45,10 +68,11 @@ func (r *RateLimiter) Middleware() gin.HandlerFunc {
 		v.count++
 		r.visitors[key] = v
 		allowed := v.count <= r.limit
+		retryAfter := v.reset.Sub(now)
 		r.mu.Unlock()
 
 		if !allowed {
-			c.Header("Retry-After", "60")
+			c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "слишком много запросов"})
 			return
 		}
