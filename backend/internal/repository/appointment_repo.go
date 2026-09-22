@@ -10,6 +10,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+var ErrInvalidStatusTransition = fmt.Errorf("недопустимый переход статуса записи")
+
 type AppointmentRepo struct {
 	db *sqlx.DB
 }
@@ -198,9 +200,27 @@ func (r *AppointmentRepo) ConfirmPendingPayment(ctx context.Context, id uuid.UUI
 }
 
 func (r *AppointmentRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status models.AppointmentStatus) error {
-	_, err := r.db.ExecContext(ctx,
-		`update appointments set status = $1, updated_at = now() where id = $2`, status, id)
-	return err
+	res, err := r.db.ExecContext(ctx, `
+		update appointments
+		set status = $1, updated_at = now()
+		where id = $2
+		  and (
+			status = $1
+			or (status = 'pending' and $1 in ('confirmed', 'cancelled'))
+			or (status = 'confirmed' and $1 in ('cancelled', 'completed', 'no_show'))
+		  )
+	`, status, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrInvalidStatusTransition
+	}
+	return nil
 }
 
 func (r *AppointmentRepo) Reschedule(ctx context.Context, id uuid.UUID, startsAt, endsAt time.Time) error {
@@ -223,6 +243,15 @@ func (r *AppointmentRepo) SetPayment(ctx context.Context, id uuid.UUID, paymentI
 		set payment_id = $1, amount_kopeks = $2, payment_mode = $3, updated_at = now()
 		where id = $4
 	`, paymentID, amountKopeks, mode, id)
+	return err
+}
+
+func (r *AppointmentRepo) SetPaymentID(ctx context.Context, id uuid.UUID, paymentID string) error {
+	_, err := r.db.ExecContext(ctx, `
+		update appointments
+		set payment_id = $1, updated_at = now()
+		where id = $2 and payment_id = ''
+	`, paymentID, id)
 	return err
 }
 
