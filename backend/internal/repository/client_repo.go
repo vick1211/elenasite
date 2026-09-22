@@ -8,8 +8,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 )
+
+// ловит ошибку, если она вызвана нарушением ограничения unique в postgres
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 var ErrPhoneTakenByAnotherEmail = errors.New("этот телефон уже зарегистрирован с другой почтой")
 
@@ -63,11 +70,19 @@ func (r *ClientRepo) GetByPhone(ctx context.Context, phone string) (*models.Clie
 func (r *ClientRepo) FindOrCreate(ctx context.Context, c *models.Client) (*models.Client, error) {
 	existing, err := r.GetByEmail(ctx, c.Email)
 	if err == nil {
+		if existing.Phone != c.Phone {
+			if byPhone, phoneErr := r.GetByPhone(ctx, c.Phone); phoneErr == nil && byPhone.Email != c.Email {
+				return nil, ErrPhoneTakenByAnotherEmail
+			}
+		}
 		existing.FirstName = c.FirstName
 		existing.LastName = c.LastName
 		existing.Patronym = c.Patronym
 		existing.Phone = c.Phone
 		if updErr := r.updateContactInfo(ctx, existing); updErr != nil {
+			if isUniqueViolation(updErr) {
+				return nil, ErrPhoneTakenByAnotherEmail
+			}
 			return nil, updErr
 		}
 		return existing, nil
@@ -78,6 +93,12 @@ func (r *ClientRepo) FindOrCreate(ctx context.Context, c *models.Client) (*model
 	}
 
 	if err := r.Create(ctx, c); err != nil {
+		if isUniqueViolation(err) {
+			if again, againErr := r.GetByEmail(ctx, c.Email); againErr == nil {
+				return again, nil
+			}
+			return nil, ErrPhoneTakenByAnotherEmail
+		}
 		return nil, fmt.Errorf("create client: %w", err)
 	}
 	return c, nil
