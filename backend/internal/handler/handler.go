@@ -70,6 +70,18 @@ func New(
 	}
 }
 
+func parseCalendarRFC3339(raw string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, errors.New("invalid starts_at, use RFC3339")
+	}
+	_, offset := t.Zone()
+	if offset != 5*60*60 {
+		return time.Time{}, errors.New("время должно быть передано с часовым поясом Asia/Yekaterinburg (+05:00)")
+	}
+	return t, nil
+}
+
 var allSlotTimes = []string{"10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00"}
 
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
@@ -147,8 +159,10 @@ func (h *Handler) ListServices(c *gin.Context) {
 }
 
 func (h *Handler) ListNews(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, offset, ok := parsePagination(c, 20)
+	if !ok {
+		return
+	}
 	list, err := h.newsRepo.ListPublished(c.Request.Context(), limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
@@ -236,6 +250,8 @@ func safeAppointmentError(err error) string {
 		"для этой услуги доступен только онлайн-формат",
 		"для этой услуги доступен только очный формат",
 		"время уже занято или произошла ошибка",
+		"время должно быть передано с часовым поясом Asia/Yekaterinburg",
+		"демо-услуга недоступна для публичной записи",
 		"эту запись нельзя перенести",
 	} {
 		if strings.HasPrefix(msg, allowed) {
@@ -272,7 +288,7 @@ func (h *Handler) CreateAppointment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid service_id"})
 		return
 	}
-	startsAt, err := time.Parse(time.RFC3339, req.StartsAt)
+	startsAt, err := parseCalendarRFC3339(req.StartsAt)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid starts_at, use RFC3339"})
 		return
@@ -379,9 +395,32 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": token})
 }
 
+func parsePagination(c *gin.Context, defaultLimit int) (int, int, bool) {
+	limit, offset := defaultLimit, 0
+	if raw := c.Query("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 200 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be between 1 and 200"})
+			return 0, 0, false
+		}
+		limit = n
+	}
+	if raw := c.Query("offset"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "offset must be >= 0"})
+			return 0, 0, false
+		}
+		offset = n
+	}
+	return limit, offset, true
+}
+
 func (h *Handler) AdminListClients(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, offset, ok := parsePagination(c, 50)
+	if !ok {
+		return
+	}
 	list, err := h.clientRepo.List(c.Request.Context(), limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
@@ -445,10 +484,20 @@ func (h *Handler) AdminListAppointments(c *gin.Context) {
 	if s := c.Query("status"); s != "" {
 		opts.Status = models.AppointmentStatus(s)
 	}
-	if l, err := strconv.Atoi(c.Query("limit")); err == nil {
+	if c.Query("limit") != "" {
+		l, err := strconv.Atoi(c.Query("limit"))
+		if err != nil || l < 1 || l > 200 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be between 1 and 200"})
+			return
+		}
 		opts.Limit = l
 	}
-	if o, err := strconv.Atoi(c.Query("offset")); err == nil {
+	if c.Query("offset") != "" {
+		o, err := strconv.Atoi(c.Query("offset"))
+		if err != nil || o < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "offset must be >= 0"})
+			return
+		}
 		opts.Offset = o
 	}
 
@@ -495,7 +544,7 @@ func (h *Handler) AdminReschedule(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "internal server error"})
 		return
 	}
-	t, err := time.Parse(time.RFC3339, req.StartsAt)
+	t, err := parseCalendarRFC3339(req.StartsAt)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid starts_at"})
 		return
@@ -537,6 +586,10 @@ func (h *Handler) AdminUpdateStatus(c *gin.Context) {
 		return
 	}
 	if err := h.apptRepo.UpdateStatus(c.Request.Context(), id, allowedStatus); err != nil {
+		if errors.Is(err, repository.ErrInvalidStatusTransition) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "не удалось изменить статус"})
 		return
 	}
@@ -790,7 +843,7 @@ func (h *Handler) AdminCreateAppointment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid service_id"})
 		return
 	}
-	startsAt, err := time.Parse(time.RFC3339, req.StartsAt)
+	startsAt, err := parseCalendarRFC3339(req.StartsAt)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid starts_at, use RFC3339"})
 		return
