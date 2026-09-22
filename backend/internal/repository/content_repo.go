@@ -32,7 +32,7 @@ func (r *ServiceRepo) Create(ctx context.Context, s *models.Service) error {
 func (r *ServiceRepo) ListActive(ctx context.Context) ([]models.Service, error) {
 	var list []models.Service
 	err := r.db.SelectContext(ctx, &list,
-		`select * from services where is_active = true order by title`)
+		`select * from services where is_active = true and is_demo = false order by title`)
 	return list, err
 }
 
@@ -69,7 +69,6 @@ func (r *ServiceRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.ExecContext(ctx, `delete from services where id = $1`, id)
 	return err
 }
-
 
 type NewsRepo struct {
 	db *sqlx.DB
@@ -120,7 +119,6 @@ func (r *NewsRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.ExecContext(ctx, `delete from news where id = $1`, id)
 	return err
 }
-
 
 type ReviewRepo struct {
 	db *sqlx.DB
